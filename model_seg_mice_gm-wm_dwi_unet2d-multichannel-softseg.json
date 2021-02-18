@@ -1,0 +1,193 @@
+{
+    "command": "train",
+    "gpu_ids": [
+        7
+    ],
+    "path_output": "exvivo_gm_wm",
+    "model_name": "my_model",
+    "debugging": false,
+    "object_detection_params": {
+        "object_detection_path": null,
+        "safety_factor": [
+            1.0,
+            1.0,
+            1.0
+        ],
+        "gpu_ids": 7,
+        "path_output": "exvivo_gm_wm"
+    },
+    "loader_parameters": {
+        "path_data": [
+            "../duke/projects/ivadomed/gm_dwi_exvivo"
+        ],
+        "subject_selection": {
+            "n": [],
+            "metadata": [],
+            "value": []
+        },
+        "target_suffix": [
+            "_gmseg_manual",
+            "_wmseg_manual"
+        ],
+        "extensions": [],
+        "roi_params": {
+            "suffix": null,
+            "slice_filter_roi": null
+        },
+        "contrast_params": {
+            "training_validation": [
+                "dwi_T0000"
+            ],
+            "testing": [],
+            "balance": {}
+        },
+        "slice_filter_params": {
+            "filter_empty_mask": true,
+            "filter_empty_input": true
+        },
+        "slice_axis": "axial",
+        "multichannel": false,
+        "soft_gt": true
+    },
+    "split_dataset": {
+        "fname_split": null,
+        "random_seed": 6,
+        "center_test": [],
+        "method": "per_patient",
+        "balance": null,
+        "train_fraction": 0.8,
+        "test_fraction": 0
+    },
+    "training_parameters": {
+        "batch_size": 4,
+        "loss": {
+            "name": "AdapWingLoss"
+        },
+        "training_time": {
+            "num_epochs": 150,
+            "early_stopping_patience": 50,
+            "early_stopping_epsilon": 0.0001
+        },
+        "scheduler": {
+            "initial_lr": 0.001,
+            "lr_scheduler": {
+                "name": "CosineAnnealingLR",
+                "base_lr": 1e-05,
+                "max_lr": 0.01
+            }
+        },
+        "balance_samples": {
+            "applied": false,
+            "type": "gt"
+        },
+        "mixup_alpha": null,
+        "transfer_learning": {
+            "retrain_model": null,
+            "retrain_fraction": 1.0,
+            "reset": true
+        }
+    },
+    "default_model": {
+        "name": "Unet",
+        "dropout_rate": 0.3,
+        "bn_momentum": 0.9,
+        "depth": 4,
+        "is_2d": true,
+        "final_activation": "relu"
+    },
+    "uncertainty": {
+        "epistemic": false,
+        "aleatoric": false,
+        "n_it": 0
+    },
+    "postprocessing": {
+        "remove_noise": {
+            "thr": 0.01
+        },
+        "keep_largest": {},
+        "binarize_prediction": {},
+        "uncertainty": {},
+        "fill_holes": {},
+        "remove_small": {
+            "unit": "vox",
+            "thr": 3
+        }
+    },
+    "evaluation_parameters": {
+        "target_size": {
+            "unit": "vox",
+            "thr": [
+                20,
+                100
+            ]
+        },
+        "overlap": {
+            "unit": "vox",
+            "thr": 3
+        }
+    },
+    "transformation": {
+        "Resample": {
+            "wspace": 0.04,
+            "hspace": 0.04,
+            "dspace": 1
+        },
+        "CenterCrop": {
+            "size": [
+                250,
+                250
+            ]
+        },
+        "RandomAffine": {
+            "degrees": 40,
+            "translate": [
+                0.03,
+                0.03
+            ],
+            "applied_to": [
+                "im",
+                "gt"
+            ],
+            "dataset_type": [
+                "training"
+            ]
+        },
+        "NumpyToTensor": {},
+        "NormalizeInstance": {
+            "applied_to": [
+                "im"
+            ]
+        }
+    },
+    "FiLMedUnet": {
+        "applied": false,
+        "metadata": "contrasts",
+        "film_layers": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+        ]
+    },
+    "Modified3DUNet": {
+        "applied": false,
+        "length_3D": [
+            128,
+            128,
+            16
+        ],
+        "stride_3D": [
+            128,
+            128,
+            16
+        ],
+        "attention": false,
+        "n_filters": 8
+    }
+}
