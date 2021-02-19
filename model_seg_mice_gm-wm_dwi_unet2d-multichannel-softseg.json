@@ -46,7 +46,7 @@
             "filter_empty_input": true
         },
         "slice_axis": "axial",
-        "multichannel": false,
+        "multichannel": true,
         "soft_gt": true
     },
     "split_dataset": {
@@ -69,7 +69,7 @@
             "early_stopping_epsilon": 0.0001
         },
         "scheduler": {
-            "initial_lr": 0.001,
+            "initial_lr": 0.0001,
             "lr_scheduler": {
                 "name": "CosineAnnealingLR",
                 "base_lr": 1e-05,
@@ -90,7 +90,7 @@
     "default_model": {
         "name": "Unet",
         "dropout_rate": 0.3,
-        "bn_momentum": 0.9,
+        "bn_momentum": 0.1,
         "depth": 4,
         "is_2d": true,
         "final_activation": "relu"
@@ -104,9 +104,6 @@
         "remove_noise": {
             "thr": 0.01
         },
-        "keep_largest": {},
-        "binarize_prediction": {},
-        "uncertainty": {},
         "fill_holes": {},
         "remove_small": {
             "unit": "vox",
@@ -141,8 +138,8 @@
         "RandomAffine": {
             "degrees": 40,
             "translate": [
-                0.03,
-                0.03
+                0.1,
+                0.1
             ],
             "applied_to": [
                 "im",
