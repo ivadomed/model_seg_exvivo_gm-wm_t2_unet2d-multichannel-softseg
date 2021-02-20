@@ -3,7 +3,7 @@
     "gpu_ids": [
         7
     ],
-    "path_output": "exvivo_gm_wm",
+    "path_output": "exvivo_gm_wm_multi",
     "model_name": "my_model",
     "debugging": false,
     "object_detection_params": {
@@ -14,7 +14,7 @@
             1.0
         ],
         "gpu_ids": 7,
-        "path_output": "exvivo_gm_wm"
+        "path_output": "exvivo_gm_wm_multi"
     },
     "loader_parameters": {
         "path_data": [
@@ -46,7 +46,7 @@
             "filter_empty_input": true
         },
         "slice_axis": "axial",
-        "multichannel": true,
+        "multichannel": false,
         "soft_gt": true
     },
     "split_dataset": {
@@ -59,7 +59,7 @@
         "test_fraction": 0
     },
     "training_parameters": {
-        "batch_size": 4,
+        "batch_size": 2,
         "loss": {
             "name": "AdapWingLoss"
         },
@@ -69,7 +69,7 @@
             "early_stopping_epsilon": 0.0001
         },
         "scheduler": {
-            "initial_lr": 0.0001,
+            "initial_lr": 0.001,
             "lr_scheduler": {
                 "name": "CosineAnnealingLR",
                 "base_lr": 1e-05,
@@ -104,7 +104,6 @@
         "remove_noise": {
             "thr": 0.01
         },
-        "fill_holes": {},
         "remove_small": {
             "unit": "vox",
             "thr": 3
@@ -125,15 +124,9 @@
     },
     "transformation": {
         "Resample": {
-            "wspace": 0.04,
-            "hspace": 0.04,
+            "wspace": 0.1,
+            "hspace": 0.1,
             "dspace": 1
-        },
-        "CenterCrop": {
-            "size": [
-                250,
-                250
-            ]
         },
         "RandomAffine": {
             "degrees": 40,

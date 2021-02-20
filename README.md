@@ -1,6 +1,6 @@
 # Grey and white matters segmentation on exvivo DWI mouse data
 
-![alt text](seg_gm_wm.gif)
+![alt text](image.gif)
 
 Segmentation model for mouse spinal gray and white matter on DWI data.
 
