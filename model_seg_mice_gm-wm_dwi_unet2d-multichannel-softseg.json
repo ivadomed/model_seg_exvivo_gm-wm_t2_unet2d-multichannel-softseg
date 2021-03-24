@@ -26,8 +26,8 @@
             "value": []
         },
         "target_suffix": [
-            "_gmseg_manual",
-            "_wmseg_manual"
+            "_gmseg",
+            "_wmseg"
         ],
         "extensions": [],
         "roi_params": {
