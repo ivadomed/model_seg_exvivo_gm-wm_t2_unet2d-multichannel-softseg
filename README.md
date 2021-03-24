@@ -1,8 +1,8 @@
-# Grey and white matters segmentation on exvivo DWI mouse data
+# Grey and white matters segmentation on exvivo T2 human data
 
 ![alt text](image.gif)
 
-Segmentation model for mouse spinal gray and white matter on DWI data.
+Segmentation model for human spinal gray and white matter on T2 data.
 
 Created with [ivadomed](http://ivadomed.org/) using data from University of Queensland 🇦🇺.
 Training features include: 2D unet, multiclass, SoftSeg.
