@@ -1,9 +1,9 @@
 {
     "command": "train",
     "gpu_ids": [
-        7
+        0
     ],
-    "path_output": "exvivo_gm_wm_multi",
+    "path_output": "exvivo_gm_wm_multi_notflipped",
     "model_name": "my_model",
     "debugging": false,
     "object_detection_params": {
@@ -13,12 +13,12 @@
             1.0,
             1.0
         ],
-        "gpu_ids": 7,
-        "path_output": "exvivo_gm_wm_multi"
+        "gpu_ids": 0,
+        "path_output": "exvivo_gm_wm_multi_notflipped"
     },
     "loader_parameters": {
         "path_data": [
-            "../duke/projects/ivadomed/gm_dwi_exvivo"
+            "../duke/projects/ivadomed/gm_t2_exvivo"
         ],
         "subject_selection": {
             "n": [],
@@ -29,14 +29,16 @@
             "_gmseg",
             "_wmseg"
         ],
-        "extensions": [],
+        "extensions": [
+            ".nii.gz"
+        ],
         "roi_params": {
             "suffix": null,
             "slice_filter_roi": null
         },
         "contrast_params": {
             "training_validation": [
-                "dwi_T0000"
+                "T2w"
             ],
             "testing": [],
             "balance": {}
@@ -47,13 +49,17 @@
         },
         "slice_axis": "axial",
         "multichannel": false,
-        "soft_gt": true
+        "soft_gt": true,
+        "is_input_dropout": false
     },
     "split_dataset": {
         "fname_split": null,
         "random_seed": 6,
-        "center_test": [],
-        "method": "per_patient",
+        "split_method": "participant_id",
+        "data_testing": {
+            "data_type": null,
+            "data_value": []
+        },
         "balance": null,
         "train_fraction": 0.8,
         "test_fraction": 0
