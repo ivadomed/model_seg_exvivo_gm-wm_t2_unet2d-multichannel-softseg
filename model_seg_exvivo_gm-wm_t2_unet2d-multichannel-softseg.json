@@ -3,7 +3,7 @@
     "gpu_ids": [
         0
     ],
-    "path_output": "exvivo_gm_wm_multi_notflipped",
+    "path_output": "exvivo_gm_wm_multi_20210331_223156",
     "model_name": "my_model",
     "debugging": false,
     "object_detection_params": {
@@ -14,11 +14,11 @@
             1.0
         ],
         "gpu_ids": 0,
-        "path_output": "exvivo_gm_wm_multi_notflipped"
+        "path_output": "exvivo_gm_wm_multi_20210331_223156"
     },
     "loader_parameters": {
         "path_data": [
-            "../duke/projects/ivadomed/gm_t2_exvivo"
+            "../duke/projects/ivadomed/gm_t2_exvivo__20210331_223156"
         ],
         "subject_selection": {
             "n": [],
