@@ -11,12 +11,12 @@ This model is readily available in [SCT](https://spinalcordtoolbox.com/en/stable
 
 ... can be installed as follows:
 ```bash
-sct_deepseg -install-task seg_mice_gm-wm_dwi
+sct_deepseg -install-task seg_exvivo_gm-wm_t2
 ```
 
 ... and can be used as follows:
 ```bash
-sct_deepseg -i NIFTI_IMAGE -task seg_mice_gm-wm_dwi
+sct_deepseg -i NIFTI_IMAGE -task seg_exvivo_gm-wm_t2
 ```
 
 **Data acquisition:**
