@@ -7,7 +7,7 @@ paths:
     masks:
       - "derivatives/labels/sub-3902bottom/anat/"
       - "derivatives/labels/sub-3902top/anat/"
-  results: "/home/ge.polymtl.ca/jemal/data_nvme_jemal/monai/results"
+  results: "/home/ge.polymtl.ca/jemal/data_nvme_jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/monai/results"
 
 data:
   slice_axis: 1
@@ -28,6 +28,7 @@ training:
   eta_min: 0.00001
   train_set_size: 0.8
   val_set_size: 0.2
+  optimizer: "Adam"
 
 UNet:
   spatial_dims: 2

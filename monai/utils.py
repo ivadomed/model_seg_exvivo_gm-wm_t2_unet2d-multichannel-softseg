@@ -1,4 +1,57 @@
 import os
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import ndimage
+
+
+def check_empty_patch(labels):
+    for i, label in enumerate(labels):
+        if torch.sum(label) == 0.0:
+            # print(f"Empty label patch found at index {i}. Skipping training step ...")
+            return None
+    return labels  # If no empty patch is found, return the labels
+
+def plot_slices(image, gt, pred, debug=False):
+    """
+    Plot the image, ground truth and prediction of the mid-sagittal axial slice
+    The orientaion is assumed to RPI
+    """
+
+    # bring everything to numpy
+    image = image.numpy()
+    gt = gt.numpy()
+    pred = pred.numpy()
+
+   # if not debug:
+    fig, axs = plt.subplots(3, 1, figsize=(10, 6))
+    fig.suptitle('Original Image --> Ground Truth --> Prediction')
+    axs[0].imshow(image, cmap='gray'); axs[0].axis('off') 
+    axs[1].imshow(gt); axs[1].axis('off')
+    axs[2].imshow(pred); axs[2].axis('off')
+    
+
+    plt.tight_layout()
+    fig.show()
+    return fig
+
+# Copied from ivadomed
+def keep_largest_object(predictions):
+    """Keep the largest connected object from the input array (2D or 3D).
+
+    Args:
+        predictions (ndarray or nibabel object): Input segmentation. Image could be 2D or 3D.
+
+    Returns:
+        ndarray or nibabel (same object as the input).
+    """
+    # Find number of closed objects using skimage "label"
+    labeled_obj, num_obj = ndimage.label(np.copy(predictions))
+    # If more than one object is found, keep the largest one
+    if num_obj > 1:
+        # Keep the largest object
+        predictions[np.where(labeled_obj != (np.bincount(labeled_obj.flat)[1:].argmax() + 1))] = 0
+    return predictions
 
 def get_last_folder_id(parent_dir):
     
@@ -14,42 +67,10 @@ def get_last_folder_id(parent_dir):
             
     return highest_num
 
-def create_model_dir(parent_dir):
-   
+def create_indexed_dir(parent_dir):
     highest_num = get_last_folder_id(parent_dir)
-    last_dir_path = os.path.join(parent_dir, str(highest_num))
-    model_exists = check_existing_model(last_dir_path)
-    if model_exists:
-        next_dir_num = highest_num + 1
-        next_dir_path = os.path.join(parent_dir, str(next_dir_num))
-        os.makedirs(next_dir_path, exist_ok=True)
-        print(f"Created directory: {next_dir_path}")
-        return next_dir_path
-    else: 
-        print(f"Using existing directory: {last_dir_path}")
-        return last_dir_path
-
-def check_existing_model(parent_dir):
-
-    highest_num = get_last_folder_id(parent_dir)
-            
-    if highest_num == 0:
-        return None
-    
-    last_dir_path = os.path.join(parent_dir, str(highest_num))
-
-    for filename in os.listdir(last_dir_path):
-        if filename.endswith(".pth") and os.path.isfile(os.path.join(last_dir_path, filename)):
-            return os.path.join(last_dir_path, filename)
-        
-    return None
-
-def create_seg_dir(parent_dir):
-    highest_num = get_last_folder_id(parent_dir)
-    if highest_num == 0:
-        print(f"No directory found in {parent_dir}")
-        return 
-    seg_dir = os.path.join(parent_dir, str(highest_num), "seg")
-    os.makedirs(seg_dir, exist_ok=True)
-    print(f"Created directory: {seg_dir}")
-    return seg_dir
+    next_dir_num = highest_num + 1
+    next_dir_path = os.path.join(parent_dir, str(next_dir_num))
+    os.makedirs(next_dir_path, exist_ok=True)
+    print(f"Created directory: {next_dir_path}")
+    return next_dir_path

@@ -4,32 +4,42 @@ import scipy
 import scipy.ndimage
 import numpy as np
 
+from monai.losses import DiceLoss
+
+from scipy.ndimage import distance_transform_edt as distance
+
 class AdapWingLoss(nn.Module):
     """
-    Adaptive Wing loss
-    Used for heatmap ground truth.
+    Adaptive Wing loss used for heatmap regression
+    Adapted from: https://github.com/ivadomed/ivadomed/blob/master/ivadomed/losses.py#L341
 
     .. seealso::
         Wang, Xinyao, Liefeng Bo, and Li Fuxin. "Adaptive wing loss for robust face alignment via heatmap regression."
         Proceedings of the IEEE International Conference on Computer Vision. 2019.
 
     Args:
-        theta (float): Threshold between linear and non linear loss.
-        alpha (float): Used to adapt loss shape to input shape and make loss smooth at 0 (background).
+        theta (float): Threshold to switch between the linear and non-linear parts of the piece-wise loss function.
+        alpha (float): Used to adapt the behaviour of the loss function at y=0 and y=1 and make loss smooth at 0 (background).
         It needs to be slightly above 2 to maintain ideal properties.
-        omega (float): Multiplicating factor for non linear part of the loss.
+        omega (float): Multiplicative factor for non linear part of the loss.
         epsilon (float): factor to avoid gradient explosion. It must not be too small
+        NOTE: Larger omega and smaller epsilon values will increase the influence on small errors and vice versa
     """
-    def __init__(self, theta=0.5, alpha=2.1, omega=14, epsilon=1):
+
+    def __init__(self, theta=0.5, alpha=2.1, omega=14, epsilon=1, reduction='sum'):
         self.theta = theta
         self.alpha = alpha
         self.omega = omega
         self.epsilon = epsilon
+        self.reduction = reduction
         super(AdapWingLoss, self).__init__()
 
     def forward(self, input, target):
         eps = self.epsilon
-        # Compute adaptative factor
+        batch_size = target.size()[0]
+
+        # Adaptive Wing loss. Section 4.2 of the paper.
+        # Compute adaptive factor
         A = self.omega * (1 / (1 + torch.pow(self.theta / eps,
                                              self.alpha - target))) * \
             (self.alpha - target) * torch.pow(self.theta / eps,
@@ -38,9 +48,18 @@ class AdapWingLoss(nn.Module):
         # Constant term to link linear and non linear part
         C = (self.theta * A - self.omega * torch.log(1 + torch.pow(self.theta / eps, self.alpha - target)))
 
-        batch_size = target.size()[0]
-        hm_num = target.size()[1]
+        diff_hm = torch.abs(target - input)
+        AWingLoss = A * diff_hm - C
+        idx = diff_hm < self.theta
+        # NOTE: this is a memory-efficient version than the one in ivadomed losses.py
+        # where idx is True, compute the non-linear part of the loss, otherwise keep the linear part
+        # the non-linear parts ensures small errors (as given by idx) have a larger influence to refine the predictions at the boundaries
+        # the linear part makes the loss function behave more like the MSE loss, which has a linear influence 
+        # (i.e. small errors where y=0 --> small influence --> small gradients)
+        AWingLoss = torch.where(idx, self.omega * torch.log(1 + torch.pow(diff_hm / eps, self.alpha - target)), AWingLoss)
 
+
+        # Mask for weighting the loss function. Section 4.3 of the paper.
         mask = torch.zeros_like(target)
         kernel = scipy.ndimage.generate_binary_structure(2, 2)
         # For 3D segmentation tasks
@@ -52,20 +71,42 @@ class AdapWingLoss(nn.Module):
             img_list.append(np.round(target[i].cpu().numpy() * 255))
             img_merge = np.concatenate(img_list)
             img_dilate = scipy.ndimage.binary_opening(img_merge, np.expand_dims(kernel, axis=0))
+            # NOTE: why 51? the paper thresholds the dilated GT heatmap at 0.2. So, 51/255 = 0.2 
             img_dilate[img_dilate < 51] = 1  # 0*omega+1
             img_dilate[img_dilate >= 51] = 1 + self.omega  # 1*omega+1
             img_dilate = np.array(img_dilate, dtype=int)
 
             mask[i] = torch.tensor(img_dilate)
 
-        diff_hm = torch.abs(target - input)
-        AWingLoss = A * diff_hm - C
-        idx = diff_hm < self.theta
-        AWingLoss[idx] = self.omega * torch.log(1 + torch.pow(diff_hm / eps, self.alpha - target))[idx]
-
         AWingLoss *= mask
-        sum_loss = torch.sum(AWingLoss)
-        all_pixel = torch.sum(mask)
-        mean_loss = sum_loss  # / all_pixel
 
-        return mean_loss
+        sum_loss = torch.sum(AWingLoss)
+        if self.reduction == "sum":
+            return sum_loss
+        elif self.reduction == "mean":
+            all_pixel = torch.sum(mask)
+            return sum_loss / all_pixel
+        
+class BoundaryLoss(nn.Module):
+    def __init__(self):
+        super(BoundaryLoss, self).__init__()
+
+    def forward(self, prediction, target):
+        target_dist = torch.tensor(distance(target.cpu().numpy())).float().to(target.device)
+
+        pred_prob = torch.sigmoid(prediction)
+
+        prod = target_dist * pred_prob
+        boundary_loss = prod.sum() / target_dist.sum()
+        return boundary_loss
+    
+class BoundaryDiceLoss(nn.Module):
+    def __init__(self, boundary_weight=0.5):
+        super(BoundaryDiceLoss, self).__init__()
+        self.boundary_weight = boundary_weight
+        self.dice = DiceLoss(include_background=False)
+
+    def forward(self, prediction, target):
+        dice_loss = self.dice(prediction, target)
+        boundary_loss = BoundaryLoss()(prediction, target)
+        return dice_loss + self.boundary_weight * boundary_loss

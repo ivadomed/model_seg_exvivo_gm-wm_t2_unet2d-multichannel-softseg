@@ -2,8 +2,10 @@ import nibabel as nib
 import numpy as np
 
 from monai.data import Dataset
-from transforms import remove_empty_slices
+
 from skimage.transform import resize
+
+from scipy.ndimage import zoom
 
 class Segmentation2dDataset(Dataset):
     """
@@ -23,7 +25,7 @@ class Segmentation2dDataset(Dataset):
         # Load the 3D volumes and their corresponding masks
         for i in range(len(data)):
             image, mask = load_2d_training_sample(data[i]['image'], data[i]['mask'], axis)
-
+            #TODO: coder proprement
             image = np.moveaxis(image, axis, 0)
             mask = np.moveaxis(mask, axis, 0)
             for j in range(image.shape[0]):
@@ -43,6 +45,7 @@ class Segmentation2dDataset(Dataset):
         mask = self.masks[index]
 
         # Resampling
+        #TODO: coder proprement
         slice = resize(slice, (200,200), anti_aliasing=True)
         mask = resize(mask, (200,200), anti_aliasing=True)
 
@@ -73,13 +76,12 @@ class Inference2dDataset(Dataset):
         self.slices = []
         self.transform = transform
 
-        # Load the 3D volumes 
+        # Load the 3D volumes and their corresponding masks
         for i in range(len(data)):
-            image = nib.load(data[i]['image'])
-            image = image.get_fdata()
+            image= nib.load(data[i]['image']).get_fdata()
             image = np.moveaxis(image, axis, 0)
             for j in range(image.shape[0]):
-                self.slices.append(image[j])
+                self.slices.append(image[j,:, :])
 
     def __getitem__(self, index):
         """
@@ -87,16 +89,19 @@ class Inference2dDataset(Dataset):
             index (int): Index of the 2D slice to be returned.
 
         Returns:
-            dict: A dictionnary containing the 2D slice and its corresponding mask.
+            dict: A dictionnary containing the 2D slice.
         """
         slice = self.slices[index]
 
         # Resampling
+        #TODO: coder proprement
         slice = resize(slice, (200,200), anti_aliasing=True)
 
         # Apply transformations if any
         if self.transform:
             slice = self.transform(slice)
+
+        slice = slice[np.newaxis, ...]
 
         return {"image": slice}
 
@@ -122,3 +127,8 @@ def load_2d_training_sample(image_path, mask_path, axis):
     return image_data, mask_data
 
     
+def remove_empty_slices(images, masks):
+    valid_indices = [i for i, (image, mask) in enumerate(zip(images, masks)) if not (image.sum() == 0 or mask.sum() == 0)]
+    filtered_images = [images[i] for i in valid_indices]
+    filtered_masks = [masks[i] for i in valid_indices]
+    return filtered_images, filtered_masks

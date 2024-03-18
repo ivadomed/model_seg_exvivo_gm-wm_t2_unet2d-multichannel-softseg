@@ -1,141 +1,239 @@
-#%%
-
-# Import the required libraries
-import torch
 import os
 import numpy as np
+from loguru import logger
+import torch.nn.functional as F
+import torch
 import yaml
-from PIL import Image
+import nibabel as nib
 
-from monai.networks.nets import UNet
-from monai.transforms import Compose, ScaleIntensity
+from datetime import datetime
 
-from torch.utils.data import DataLoader
+from time import time
 
 from skimage.transform import resize
 
-from transforms import RandAffineRel
+from scipy.ndimage import zoom
+
+from monai.data import (DataLoader, decollate_batch)
+from monai.transforms import (Compose,ScaleIntensity)
+from monai.networks.nets import UNet, DynUNet
+from monai.losses import DiceCELoss, DiceLoss, DiceFocalLoss
+
 from data import Inference2dDataset
-from utils import check_existing_model, create_seg_dir
-from train import UNetTrainer
-from postprocessing import remove_noise, remove_small
+from utils import keep_largest_object, create_indexed_dir, get_last_folder_id
+from main import Model
+from loss import AdapWingLoss, BoundaryDiceLoss
+from metrics import compute_dice_score
 
-# Define inference parameters
-device = "gpu"
-gpu_id = 1
+# ===========================================================================
+#                   Prepare temporary dataset for inference
+# ===========================================================================
+def prepare_data(config):
+        
+        root = config["paths"]["dataset"]
+        
+        image_dir = os.path.join(root, config["paths"]["sub_paths"]["img"][0]) 
+        data = []
 
-config_file_path = 'config.yaml'
-with open(config_file_path, 'r') as file:
-    config = yaml.safe_load(file)
+        stems = [f[:-7] for f in os.listdir(image_dir) if  f.endswith('.nii.gz')]
+        for stem in stems:
+            data.append({
+                "image": os.path.join(image_dir, f"{stem}.nii.gz"),
+            })
 
-# Setup the device
-if device == "gpu" and not torch.cuda.is_available():
-    print("GPU not available, using CPU instead")
-    device = torch.device("cpu")
-else:
-    device = torch.device("cuda" if torch.cuda.is_available() and device == "gpu" else "cpu")
+        #TODO: coder proprement
+        nib_image = nib.load(data[0]['image'])
+        volume = nib_image.get_fdata()
+        affine = nib_image.affine
+        
+        # define inference_transforms
+        transform = Compose([
+                ScaleIntensity(),
+            ])
+        
+        logger.info(f"Loading dataset: {root}")      
+        dataset = Inference2dDataset(data = data, axis = 1, transform=transform)
 
-if device == torch.device("cpu"):
-    raise KeyboardInterrupt("CPU is not supported for this task")
-else:
-    print(f"Using {device} for training")
-    torch.cuda.set_device(gpu_id)
-    print(f"Using GPU:{torch.cuda.current_device()} to run inference")
+        return dataset, volume, affine
 
-# Load a model, or train a new one
-model_path = check_existing_model(config["paths"]["results"])
+# ===========================================================================
+#                           Inference method
+# ===========================================================================
+def main():
+    device = "gpu"
+    gpu_id = 3
 
-if model_path is None:
-    print("No model found, training a new one")
-    trainer = UNetTrainer(config, mask_type="wm", device = device, gpu_id = gpu_id)
-    trainer.train()
-    trainer.save_model()
-    model = trainer.model
-else:
-    print(f"Loading model from {model_path}")
-    config_file_path = os.path.join(os.path.dirname(model_path), "config.yaml")
+    # Setup the device
+    if device == "gpu" and not torch.cuda.is_available():
+        print("GPU not available, using CPU instead")
+        device = torch.device("cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() and device == "gpu" else "cpu")
+
+    if device == torch.device("cpu"):
+        raise KeyboardInterrupt("CPU is not supported for this task")
+    else:
+        print(f"Using {device} for training")
+        torch.cuda.set_device(gpu_id)
+        print(f"Using GPU:{torch.cuda.current_device()} to run inference")
+    
+    # load the config file
+    config_file_path = 'config.yaml'
     with open(config_file_path, 'r') as file:
         config = yaml.safe_load(file)
-    model = UNet(
-        spatial_dims = config["UNet"]["spatial_dims"],
-        in_channels = config["UNet"]["in_channels"],
-        out_channels = config["UNet"]["out_channels"],
-        channels = tuple(config["UNet"]["channels"]),
-        strides = tuple(config["UNet"]["strides"]),
-        num_res_units = config["UNet"]["num_res_units"],
-        dropout = config["UNet"]["dropout"],
-        act = config["UNet"]["activation"],
-        norm = config["UNet"]["normalisation"],
-    ).to(device)
-    model.load_state_dict(torch.load(model_path))
 
-result_dir = create_seg_dir(config["paths"]["results"])
+    model_stem = "best_model_dice.ckpt"
 
-transform = Compose([
-    RandAffineRel(
-        prob= config["transformations"]["randaffine"]["proba"], 
-        affine_degrees = config["transformations"]["randaffine"]["degrees"], 
-        affine_translation = tuple(config["transformations"]["randaffine"]["translation"])
-        ),
-    ScaleIntensity()
-])
+    # define the mask type
+    mask_types = ["gm","wm"]
 
-# Dataset and dataloader
-root_path = config["paths"]["dataset"]
-images_rel_dir =  config["paths"]["sub_paths"]["img"]
-images_dir = os.path.join(root_path, images_rel_dir[0]) 
-data = []
+    for mask_type in mask_types:
+        logger.info(f"Running inference for {mask_type} mask")
 
-fnames = [f for f in os.listdir(images_dir) if  f.endswith('.nii.gz')]
-for fname in fnames:
-    data.append({
-        "image": os.path.join(images_dir, fname)
-    })
+        # define root path for finding datalists
+        training_path = os.path.join(config["paths"]["results"], str(get_last_folder_id(config["paths"]["results"])), mask_type)
+        results_path = create_indexed_dir(os.path.join(training_path, "inference"))
+        chkp_path = os.path.join(training_path, "models", model_stem)
 
-import nibabel as nib
-nib_image = nib.load(data[0]['image'])
-affine = nib_image.affine
+        # save terminal outputs to a file
+        logger.add(os.path.join(results_path, "logs.txt"), rotation="10 MB", level="INFO")
 
-segmentation_dataset = Inference2dDataset(data=data, axis = config["data"]["slice_axis"], transform=transform)
-segmentation_loader = DataLoader(segmentation_dataset, batch_size=config["training"]["batch_size"], shuffle=False)
-#%%
-# Run inference
-segmented_outputs = []
-with torch.no_grad():  # No need to track gradients
-    for batch in segmentation_loader:
-        images = batch['image']
-        images = images.to(device)  # Move images to the appropriate device
-        outputs = model(images)
-        # Store or process your outputs here
-        segmented_outputs.append({"image": images, "seg": outputs.cpu()})  
+        logger.info(f"Saving results to: {results_path}")
+        if not os.path.exists(results_path):
+            os.makedirs(results_path, exist_ok=True)
 
-# Post-processing
-final_volume = []   
-for image_index, sample in enumerate(segmented_outputs):
-    for i, seg_map in enumerate(sample["seg"][:,0,:,:]):  
-        seg_map_np = seg_map.cpu().numpy()
-        seg_map_np = remove_noise(seg_map_np, config["postprocessing"]["remove_noise"]["threshold"])
-        seg_map_np = remove_small(seg_map_np, config["postprocessing"]["remove_small"]["min_size"])
+        # define the dataset and dataloader
+        test_ds, volume, affine = prepare_data(config)
+        print(f"Len dataset: {len(test_ds)}")
+        test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=8, pin_memory=True)
 
-        segmented_outputs[image_index]["seg"][i,0,:,:] = torch.tensor(seg_map_np)
+        # define list to collect the test metrics
+        test_step_outputs = []
+
+        # define list to collect the final volume
+        final_volume = []
+            
+        # define the model and loss (not saved in the checkpoint)
+       
+        net = UNet(
+                spatial_dims = config["UNet"]["spatial_dims"],
+                in_channels = config["UNet"]["in_channels"],
+                out_channels = config["UNet"]["out_channels"],
+                channels = tuple(config["UNet"]["channels"]),
+                strides = tuple(config["UNet"]["strides"]),
+                num_res_units = config["UNet"]["num_res_units"],
+                dropout = config["UNet"]["dropout"],
+                act = config["UNet"]["activation"],
+                norm = config["UNet"]["normalisation"],
+            )
         
-        seg_map_np = resize(seg_map_np, (128,128), anti_aliasing=True)
-        final_volume.append(seg_map_np)
+        
+        #loss_function = AdapWingLoss(theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
+        #loss_function = AdapWingLoss()
+        #loss_function = DiceCELoss(include_background=False)
+        #loss_function = DiceLoss(include_background=True)
+        #loss_function = DiceFocalLoss()
+        loss_function = BoundaryDiceLoss(0.5)
 
-final_volume = np.array(final_volume)
-final_nib = nib.Nifti1Image(final_volume, affine)
+        # load the trained model weights
+        model = Model.load_from_checkpoint(chkp_path, net =net, loss_function = loss_function)
+        model.to(device)
+        model.eval()
 
-nib.save(final_nib, os.path.join(result_dir, "segmentation.nii.gz"))
+        # iterate over the dataset and compute metrics
+        with torch.no_grad():
+            for i, batch in enumerate(test_loader):
 
-# Save the segmentation maps
-for image_index, sample in enumerate(segmented_outputs): 
-    images = sample["image"][:,0,:,:]
-    segmentation_map = sample["seg"][:,0,:,:]
-    for i, (img, seg_map) in enumerate(zip(images, segmentation_map)):       
-        seg_map_np = seg_map.cpu().numpy()       
-        # Convert to an image (using PIL) and save
-        seg = Image.fromarray(np.uint8(seg_map_np * 255))  # Scale values if needed
-        seg.save(os.path.join(result_dir, f'{image_index}_{i}_seg.png'))
-        img = Image.fromarray(np.uint8(img.cpu().numpy() * 255))
-        img.save(os.path.join(result_dir, f'{image_index}_{i}_img.png'))
-        #print(f"Segmentation map {i} for batch {image_index} on {len(segmented_outputs)} saved to {result_dir}")
+                # compute time for inference per slice
+                start_time = time()
+
+                # get the test input
+                test_input = batch["image"].to(device)
+
+                # run inference  
+                batch["pred"] = model(test_input)
+
+                # take only the highest resolution prediction
+                batch["pred"] = batch["pred"][0]
+
+                # NOTE: monai's models do not normalize the output, so we need to do it manually
+                if bool(F.relu(batch["pred"]).max()):
+                    batch["pred"] = F.relu(batch["pred"]) / F.relu(batch["pred"]).max() 
+                else:
+                    batch["pred"] = F.relu(batch["pred"])
+
+                # postprocessing
+                post_test_out = decollate_batch(batch)  
+
+                pred = post_test_out[0]['pred'].cpu()
+                pred = pred.numpy()
+
+                # threshold the prediction to set all values below pred_thr to 0
+                pred[pred < config["postprocessing"]["remove_noise"]["threshold"]] = 0
+                keep_largest = True
+
+                if keep_largest:
+                    # keep only the largest connected component (to remove tiny blobs after thresholding)
+                    #logger.info("Postprocessing: Keeping the largest connected component in the prediction")
+                    pred = keep_largest_object(pred)
+                
+                #TODO: coder proprement
+                slice_final_volume = resize(pred, (128,128), anti_aliasing=True)
+
+                final_volume.append(slice_final_volume)
+                    
+                end_time = time()
+                metrics_dict = {
+                    "slice_id": i,
+                    "inference_time_in_sec": round((end_time - start_time), 2),
+                }
+                test_step_outputs.append(metrics_dict)
+
+            # save the final volume
+            final_volume = np.array(final_volume)
+
+            final_volume = np.moveaxis(final_volume, 1, 0)
+            final_nib = nib.Nifti1Image(final_volume, affine)
+
+            nib.save(final_nib, os.path.join(results_path, "segmentation.nii.gz"))
+
+            # compute the average inference time
+            sum_inference_time = np.stack([x["inference_time_in_sec"] for x in test_step_outputs]).sum()
+
+            logger.info("========================================================")
+            logger.info(f"      Inference Time per Subject: {sum_inference_time:.2f}s")
+            logger.info("========================================================")
+
+        # compute metrics
+        groundtruth_path = "/home/ge.polymtl.ca/jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/derivatives/labels/sub-3902bottom/anat"
+        if mask_type == "gm":
+            groundtruth_path = os.path.join(groundtruth_path, "sub-3902bottom_T2w_gmseg_manual.nii.gz")
+        else:
+            groundtruth_path = os.path.join(groundtruth_path, "sub-3902bottom_T2w_wmseg_manual.nii.gz")
+        groundtruth = nib.load(groundtruth_path).get_fdata()
+        new_segmentation = final_volume
+        ivadomed_seg_path = "/home/ge.polymtl.ca/jemal/data_nvme_jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/monai/results_ivadomed/"
+        if mask_type == "gm":
+            ivadomed_seg_path = os.path.join(ivadomed_seg_path, "sub-3902bottom_T2w_gmseg.nii.gz")
+        else:
+            ivadomed_seg_path = os.path.join(ivadomed_seg_path, "sub-3902bottom_T2w_wmseg.nii.gz")
+        ivadomed_segmentation = nib.load(ivadomed_seg_path).get_fdata()
+
+        # threshold the soft segmentations
+        thr = 0.5
+        groundtruth[groundtruth < groundtruth.max()*thr] = 0
+        new_segmentation[new_segmentation < thr] = 0
+        ivadomed_segmentation[ivadomed_segmentation < thr] = 0
+
+        ivadomed_dice = compute_dice_score(ivadomed_segmentation, groundtruth)
+        new_dice = compute_dice_score(new_segmentation, groundtruth)
+
+        with open(os.path.join(results_path, 'metrics.txt'), 'a') as f:
+            print('\n-------------- Metrics ----------------', file=f)
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            print(f'{timestamp}', file=f)
+            print(f'Ivadomed_dice: {ivadomed_dice}', file=f)
+            print(f'New_dice: {new_dice}', file=f)
+        
+if __name__ == "__main__":
+    main()
