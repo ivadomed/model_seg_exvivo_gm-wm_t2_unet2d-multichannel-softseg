@@ -39,10 +39,3 @@ UNet:
   activation: "relu"
   normalisation: "batch"
 
-postprocessing:
-  remove_noise:
-    apply: true
-    threshold: 0.01
-  remove_small:
-    apply: true
-    min_size: 3

@@ -158,18 +158,22 @@ def postprocessing(batch, test_post_pred):
 
     post_test_out = [test_post_pred(i) for i in decollate_batch(batch)]
 
-    pred = post_test_out[0]['pred'].cpu()
+    pred = post_test_out[0]["pred"].cpu().detach().numpy()
+    pred_wm = pred[0,:,:]
+    pred_gm = pred[1,:,:]
 
     thr = 0.1
-    pred[pred < thr] = 0
+    pred_wm[pred_wm < thr] = 0
+    pred_gm[pred_gm < thr] = 0
 
     remove = True
     if remove:
         #remove tiny blobs
         min_size = 100
-        pred = remove_smalls(pred, min_size)
+        pred_wm = remove_smalls(pred_wm, min_size)
+        pred_gm = remove_smalls(pred_gm, min_size)
 
-    return pred
+    return pred_wm, pred_gm
 
 def remove_smalls(predictions, min_size=10):
     """Remove the objects that have a size inferior to min_size
@@ -230,7 +234,8 @@ def segment_monai_2d(path_img, tmpdir, predictor):
     # Run MONAI prediction
     print('Starting inference...')
     start = time()
-    slices=[]
+    slices_wm=[]
+    slices_gm=[]
 
     # run inference
     with torch.no_grad():
@@ -239,11 +244,10 @@ def segment_monai_2d(path_img, tmpdir, predictor):
             test_input = batch["image"].to(torch.device("cpu"))
             batch["pred"] = predictor(test_input)
 
-            pred = postprocessing(batch, test_post_pred)
+            pred_wm, pred_gm = postprocessing(batch, test_post_pred)
 
-            #remove the channel dimension
-            pred = pred.numpy().squeeze(0)
-            slices.append(pred)
+            slices_wm.append(pred_wm)
+            slices_gm.append(pred_gm)
 
         # slices = list(reversed(slices))  
 
@@ -260,8 +264,11 @@ def segment_monai_2d(path_img, tmpdir, predictor):
         else:
             raise ValueError("Unknown axis orientation")
         
-        final_volume = np.stack(slices, axis=axis)
-        final_nib = nib.Nifti1Image(final_volume, orig_image.affine, orig_image.header)
+        final_volume_wm = np.stack(slices_wm, axis=axis)
+        final_nib_wm = nib.Nifti1Image(final_volume_wm, orig_image.affine, orig_image.header)
+
+        final_volume_gm = np.stack(slices_gm, axis=axis)
+        final_nib_gm = nib.Nifti1Image(final_volume_gm, orig_image.affine, orig_image.header)
 
         end = time()
         print('Inference done.')
@@ -271,18 +278,22 @@ def segment_monai_2d(path_img, tmpdir, predictor):
         # this takes about 0.25s on average on a CPU
         # image saver class
         _, fname, ext = extract_fname(path_img)
-        postfix = "seg"
-        target = f"_{postfix}"
+        postfix_wm = "wm_seg"
+        postfix_gm = "gm_seg"
+        target_wm = f"_{postfix_wm}"
+        target_gm = f"_{postfix_gm}"
         # pred_saver = SaveImage(
         #     output_dir=tmpdir, output_postfix=postfix, output_ext=ext,
         #     separate_folder=False, print_log=False)
         # save the prediction
-        fname_out = os.path.join(tmpdir, f"{fname}_{postfix}{ext}")
-        logger.info(f"Saving results to: {fname_out}")
+        fname_wm_out = os.path.join(tmpdir, f"{fname}_{postfix_wm}{ext}")
+        fname_gm_out = os.path.join(tmpdir, f"{fname}_{postfix_gm}{ext}")
+        logger.info(f"Saving results to: {tmpdir}")
         #pred_saver(pred)
-        nib.save(final_nib, fname_out)
+        nib.save(final_nib_wm, fname_wm_out)
+        nib.save(final_nib_gm, fname_gm_out)
 
-    return [fname_out], [target]
+    return [fname_wm_out, fname_gm_out], [target_wm, target_gm]
 
 def segment_volume(path_model, input_filenames, threshold = 0.5, remove_temp_files=False):
     
@@ -314,7 +325,7 @@ def segment_volume(path_model, input_filenames, threshold = 0.5, remove_temp_fil
 def main():
     
     # path to the model
-    path_model = "/home/ge.polymtl.ca/jemal/data_nvme_jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/monai"
+    path_model = "/home/ge.polymtl.ca/jemal/data_nvme_jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/monai/models/gmseg"
 
     # path to the input image
     path_img = "/home/ge.polymtl.ca/jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/sub-3902bottom/anat/sub-3902bottom_T2w.nii.gz"
