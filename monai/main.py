@@ -6,21 +6,22 @@ import torch
 import pytorch_lightning as pl
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import wandb
+from tqdm import tqdm
 
 import torch.optim as optim
 from torch.utils.data import random_split
+from pytorch_lightning.loggers import WandbLogger
 
 from monai.utils import set_determinism
-from monai.networks.nets import UNet, DynUNet
+from monai.networks.nets import UNet
 from monai.data import (DataLoader, decollate_batch)
-from monai.transforms import (Compose, EnsureType, ScaleIntensity)
-from monai.metrics import compute_surface_dice
-from monai.losses import DiceCELoss, DiceLoss, DiceFocalLoss
+from monai.transforms import (Compose, EnsureType)
 
-from utils import plot_slices, check_empty_patch, create_indexed_dir
+from utils import plot_slices, check_empty_patch, create_indexed_dir, get_last_folder_id
 from metrics import dice_score
-from loss import AdapWingLoss, BoundaryDiceLoss
-from transforms import RandAffineRel
+from loss import AdapWingLoss, BoundaryDiceLoss, BoundaryAdapWingLoss
+from transforms import training_transforms
 from data import Segmentation2dDataset
 
 
@@ -46,9 +47,8 @@ class Model(pl.LightningModule):
         self.best_val_dice, self.best_val_loss_epoch, self.best_val_loss_epoch = 0, 0, 0
         self.best_val_loss = float("inf")
 
-        #TODO: coder proprement (intégrer aux transfo?)
-        self.spacing = (0.1, 0.1)
-        self.voxel_cropping_size = self.inference_roi_size = (200, 200)
+        self.spacing = config["transformations"]["resampling"]["pixdim"]
+        self.voxel_cropping_size = self.inference_roi_size = (200,200)
 
         # define post-processing transforms for validation, nothing fancy just making sure that it's a tensor (default)
         self.val_post_pred = Compose([EnsureType()]) 
@@ -107,15 +107,12 @@ class Model(pl.LightningModule):
                     })
         
         # define training and validation transforms
-        proba, affine_degrees, affine_translation = self.config["transformations"]["randaffine"]["proba"], self.config["transformations"]["randaffine"]["degrees"], self.config["transformations"]["randaffine"]["translation"]
+        affine_degrees, affine_translation = self.config["transformations"]["randaffine"]["degrees"], self.config["transformations"]["randaffine"]["translation"]
 
-        transform = Compose([
-                RandAffineRel(prob=proba, affine_degrees=affine_degrees, affine_translation=affine_translation),
-                ScaleIntensity(),
-            ])
+        transform = training_transforms(pixdim=self.spacing, translate_range=affine_translation, rotate_range=affine_degrees)
         
         logger.info(f"Loading dataset: {self.root}")      
-        dataset = Segmentation2dDataset(data = data, axis = 1, transform=transform)
+        dataset = Segmentation2dDataset(data = data, transform=transform)
         self.train_dataset, self.val_dataset = random_split(dataset, [self.config["training"]["train_set_size"], self.config["training"]["val_set_size"]])
         
 
@@ -123,7 +120,7 @@ class Model(pl.LightningModule):
     # DATA LOADERS
     # --------------------------------
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.config["training"]["batch_size"], shuffle=True, num_workers=8, pin_memory=True)
+        return DataLoader(self.train_dataset, batch_size=self.config["training"]["batch_size"], shuffle=True, num_workers=8 , pin_memory=True)
 
     def val_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.config["training"]["batch_size"], shuffle=False, num_workers=8, pin_memory=True)
@@ -149,11 +146,11 @@ class Model(pl.LightningModule):
 
         # check if any label image patch is empty in the batch
         if check_empty_patch(masks) is None:
-            print(f"Empty label patch found. Skipping training step ...")
+            #print(f"Empty label patch found. Skipping training step ...")
             return None
 
         output = self.forward(inputs)   # logits
-        print(f"labels.shape: {masks.shape} \t output.shape: {output.shape}")
+        #print(f"labels.shape: {masks.shape} \t output.shape: {output.shape}")
         
         # calculate training loss   
         loss = self.loss_function(output, masks)
@@ -191,22 +188,22 @@ class Model(pl.LightningModule):
             mean_train_loss = (train_loss / num_items)
             mean_train_soft_dice = (train_soft_dice / num_items)
 
-            #wandb_logs = {
-            #    "train_soft_dice": mean_train_soft_dice, 
-            #    "train_loss": mean_train_loss,
-            #}
-            #self.log_dict(wandb_logs)
+            wandb_logs = {
+                "train_soft_dice": mean_train_soft_dice, 
+                "train_loss": mean_train_loss,
+            }
+            self.log_dict(wandb_logs)
 
             # plot the training images
             fig = plot_slices(image=self.train_step_outputs[0]["train_image"],
                               gt=self.train_step_outputs[0]["train_gt"],
                               pred=self.train_step_outputs[0]["train_pred"],
                               debug=self.debug)
-            #wandb.log({"training images": wandb.Image(fig)})
+            wandb.log({"training images": wandb.Image(fig)})
 
             # free up memory
             self.train_step_outputs.clear()
-            #wandb_logs.clear()
+            wandb_logs.clear()
             plt.close(fig)
 
 
@@ -266,11 +263,12 @@ class Model(pl.LightningModule):
         mean_val_soft_dice = (val_soft_dice / num_items)
         mean_val_hard_dice = (val_hard_dice / num_items)
                 
-        #wandb_logs = {
-        #    "val_soft_dice": mean_val_soft_dice,
-        #    "val_hard_dice": mean_val_hard_dice,
-        #    "val_loss": mean_val_loss,
-        #}
+        wandb_logs = {
+            "val_soft_dice": mean_val_soft_dice,
+            "val_hard_dice": mean_val_hard_dice,
+            "val_loss": mean_val_loss,
+        }
+
         # save the best model based on validation dice score
         if mean_val_soft_dice > self.best_val_dice:
             self.best_val_dice = mean_val_soft_dice
@@ -292,17 +290,17 @@ class Model(pl.LightningModule):
         
 
         # log on to wandb
-        #self.log_dict(wandb_logs)
+        self.log_dict(wandb_logs)
 
         # # plot the validation images
         fig = plot_slices(image=self.val_step_outputs[0]["val_image"],
                           gt=self.val_step_outputs[0]["val_gt"],
                           pred=self.val_step_outputs[0]["val_pred"],)
-        #wandb.log({"validation images": wandb.Image(fig)})
+        wandb.log({"validation images": wandb.Image(fig)})
 
         # free up memory
         self.val_step_outputs.clear()
-        #wandb_logs.clear()
+        wandb_logs.clear()
         plt.close(fig)
         
         # return {"log": wandb_logs}
@@ -317,7 +315,7 @@ def main(seed, check_val_every_n_epochs, max_epochs):
     # ====================================================================================================
 
     # Load the configuration file
-    config_file_path = 'config.yaml'
+    config_file_path = '/home/ge.polymtl.ca/jemal/data_nvme_jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/monai/config.yaml'
     with open(config_file_path, 'r') as file:
         config = yaml.safe_load(file)
     
@@ -341,7 +339,6 @@ def main(seed, check_val_every_n_epochs, max_epochs):
         # define models
         if model_type in ["unet", "UNet"]:
             # define image size to be fed to the model
-            img_size = (200, 200)
             
             # define model
             net = UNet(
@@ -360,22 +357,17 @@ def main(seed, check_val_every_n_epochs, max_epochs):
             bs = config["training"]["batch_size"]
 
         # save output to a log file
+        logger.remove()
+        logger.add(lambda msg: tqdm.write(msg, end=''), colorize=True)
         logger.add(os.path.join(training_dir, "logs.txt"), rotation="10 MB", level="INFO")
 
         # define loss function
-        #loss_func = AdapWingLoss(theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
-        #loss_func = AdapWingLoss()
-        #loss_func = DiceCELoss(include_background=True)
-        #loss_func = DiceLoss(include_background=True)
-        #loss_func = DiceFocalLoss()
-        loss_func = BoundaryDiceLoss(0.5)
+        if mask_type == "wm":
+            loss_func = BoundaryAdapWingLoss(boundary_weight=0.5, theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
+        else :
+            loss_func = BoundaryAdapWingLoss(boundary_weight=0.3, theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
 
-        #logger.info(f"Using AdapWingLoss with theta={loss_func.theta}, omega={loss_func.omega}, alpha={loss_func.alpha}, #epsilon={loss_func.epsilon}!")
-        #logger.info(f"Using DiceCELoss with include_background=False!")
-        #logger.info(f"Using DiceCELoss with include_background=True!")
-        #logger.info(f"Using DiceLoss with include_background=True!")
-        #logger.info(f"Using DiceFocalLoss with include_background=True!")
-        logger.info(f"Using BoundaryLoss with DiceLoss (50/50)!")
+        logger.info(f"Using BoundaryAdapWingLoss with ratio {loss_func.boundary_weight*100}/{100 - loss_func.boundary_weight*100}; theta={loss_func.theta}, omega={loss_func.omega}, alpha={loss_func.alpha}, epsilon={loss_func.epsilon}!")
 
         # define callbacks
         early_stopping = pl.callbacks.EarlyStopping(monitor="val_loss", min_delta=0.00, 
@@ -418,27 +410,24 @@ def main(seed, check_val_every_n_epochs, max_epochs):
         logger.info(f" Starting training from scratch! ")
         # wandb logger
         grp = f"monai_ivado_{model_type}" if model_type in ["unet", "UNet"] else f"monai_{model_type}"
-        exp_logger = pl.loggers.WandbLogger(
-                            name=f"seed_{seed}_lr_{lr}_bs_{bs}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
+        folder_id = get_last_folder_id(config["paths"]["results"])
+        exp_logger = WandbLogger(
+                            name=f"training_{folder_id}_mask_{mask_type}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
                             save_dir=save_path,
                             group=grp,
                             log_model=True, # save best model using checkpoint callback
                             project='ivadomed2monai',
                             entity='',
-                            config=config)
-
-        # Saving training script to wan db
-        #wandb.save("main.py")
-        #wandb.save("transforms.py")
+                            config=config) 
 
         # initialise Lightning's trainer.
         trainer = pl.Trainer(
-            devices=[3], accelerator="gpu", # strategy="ddp",
+            devices=1, accelerator="gpu", # strategy="ddp",
             logger=exp_logger,
             callbacks=[checkpoint_callback_loss, checkpoint_callback_dice, lr_monitor, early_stopping],
             check_val_every_n_epoch=check_val_every_n_epochs,
             max_epochs= max_epochs, 
-            precision=32,   # TODO: see if 16-bit precision is stable
+            precision=32,   
             # deterministic=True,
             enable_progress_bar= True, 
             profiler="simple",)     # to profile the training time taken for each step
@@ -447,11 +436,13 @@ def main(seed, check_val_every_n_epochs, max_epochs):
         trainer.fit(pl_model)        
         logger.info(f"[{mask_type}]Training Done!")
 
-    # closing the current wandb instance so that a new one is created for the next fold
-    #wandb.finish()
-    
+        
+        # Saving training script to wan db
+        wandb.save("main.py")
+        wandb.save("transforms.py")
 
-    # TODO: Figure out saving test metrics to a file
+        # closing the current wandb instance so that a new one is created for the next fold
+        wandb.finish()    
     
 
         with open(os.path.join(results_path, 'val_metrics.txt'), 'a') as f:
@@ -469,6 +460,7 @@ def main(seed, check_val_every_n_epochs, max_epochs):
             print("Best Dice Score --> %0.3f at Epoch: %0.3f" % (pl_model.best_val_dice, pl_model.best_val_dice_epoch), file=f)
 
             print('-------------------------------------------------------', file=f)
+    
     
 if __name__ == "__main__":
     seed = 42

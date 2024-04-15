@@ -1,61 +1,78 @@
 import numpy as np
-from monai.transforms import Affine
+import torch
+import nibabel as nib
 
-class RandAffineRel:
-    def __init__(self, prob=0.5, affine_translation=(0.1, 0.1), affine_degrees=45, padding_mode="zeros"):
-        """
-        Initialize the RandAffineRel object with specified parameters.
+from monai.transforms import Compose, RandAffined, Rand2DElasticd, Spacingd, NormalizeIntensityd, InvertibleTransform, RandAdjustContrastd, RandScaleIntensityd, RandGaussianNoised, RandGaussianSmoothd
+from monai.data import MetaTensor
 
-        Args:
-            prob (float): Probability of applying the transform.
-            affine_translation (tuple of float): Maximum translation as a fraction of image dimensions.
-            affine_degrees (float): Maximum rotation in degrees.
-            padding_mode (str): Padding mode ('zeros', 'border', or 'reflection').
-        """
-        self.prob = prob
-        self.affine_translation = affine_translation
-        self.affine_degrees = affine_degrees
-        self.padding_mode = padding_mode
+def training_transforms(pixdim=(0.1,0.1), translate_range=(-0.1, 0.1), rotate_range=45):
+    transforms_list = [
+        ToMetaTensord(keys=["image", "mask"]),
+        Spacingd(keys=["image", "mask"], pixdim=pixdim, align_corners=True, mode=("bilinear", "nearest"), dtype=np.float32, scale_extent=True), 
+        #Data augmentation
+        RandAffined(keys=["image", "mask"], 
+                    prob=0.9, 
+                    translate_range= translate_range, 
+                    rotate_range= (-rotate_range / 360 * 2. * np.pi, rotate_range / 360 * 2. * np.pi), 
+                    padding_mode="zeros"),
+        Rand2DElasticd(keys=["image", "mask"], prob=0.5, spacing=(15, 15), magnitude_range=(1, 2)),
+        RandGaussianNoised(keys=["image", "mask"], prob=0.4, mean=0.0, std=0.03),
+        #RandGaussianSmoothd(keys=["image", "mask"], prob=0.5, sigma_x=(0.5, 1.0), sigma_y=(0.5, 1.0)),
+        RandScaleIntensityd(keys=["image"], prob=0.5, factors=(0.5, 1.5)),
 
-        #random float between 0 and 1
-        rd = np.random.rand()
+        NormalizeIntensityd(keys=["image"]),
+    ]
+    return Compose(transforms_list)
 
-        if rd < self.prob:
-            self.affine_translation = (np.random.rand() * self.affine_translation[0], 
-                                       np.random.rand() * self.affine_translation[1])
-            self.affine_degrees = np.random.rand() * self.affine_degrees
+def inference_transforms(pixdim=(0.1,0.1)):
+    transforms_list = [
+        ToMetaTensord(keys=["image"]),
+        Spacingd(keys=["image"], pixdim=pixdim, align_corners=True, mode=("bilinear"), dtype=np.float32, scale_extent=True),
+        NormalizeIntensityd(keys=["image"]),
+        EnsureSized(keys=["image"]),
+    ]
+    return Compose(transforms_list)
 
-        else :
-            self.affine_translation = (0, 0)
-            self.affine_degrees = 0
+class EnsureSized(InvertibleTransform):
+    def __init__(self, keys):
+        super().__init__()
+        self.keys = keys
 
-    def __call__(self, slice):
-        """
-        Apply randomized affine transformations to the input slice.
+    def __call__(self, data):
+        for key in self.keys:
+            if len(data[key].shape) == 2:
+                data[key] = data[key].unsqueeze(0)
+        return data
+    
+    def inverse(self, data):
+        for key in self.keys:
+            if len(data[key].shape) == 2:
+                data[key] = data[key].unsqueeze(0)
 
-        Args:
-            slice: The slice to transform.
+        return data
 
-        Returns:
-            The transformed slice.
-        """
-        # Calculate translate_range based on the shape of the slice and affine_translation
-        
-        # add channel dimebsion if needed
-        if len(slice.shape) == 2:
-            slice = slice[np.newaxis, ...]
+class ToMetaTensord(InvertibleTransform):
+    """
+    Transform to convert NIfTI files to MetaTensors, keeping the metadata.
+    """
+    def __init__(self, keys):
+        super().__init__()
+        self.keys = keys
 
-        # Calculate translation range based on the shape of the slice and affine_translation
-        translation = (self.affine_translation[0] * slice.shape[1], 
-                              self.affine_translation[1] * slice.shape[2])
+    def __call__(self, data):
+        for key in self.keys:
+            nifti_img = (data[key])
 
-        # Convert degrees to radians for rotate_range
-        rotate_angle = self.affine_degrees * np.pi / 180
+            tensor_data = torch.from_numpy(nifti_img.get_fdata().astype('float32'))
+            meta_tensor = MetaTensor(tensor_data, affine =  nifti_img.affine)
 
-        # Create RandAffine transform with specified ranges and probability
-        affine_transform = Affine(rotate_params=rotate_angle, 
-                                      translate_params=translation, padding_mode=self.padding_mode, image_only=True)        
-        # Apply the transform
-        slice_randaffine = affine_transform(slice)
-
-        return slice_randaffine
+            data[key] = meta_tensor
+        return data
+    
+    def inverse(self, data):
+        for key in self.keys:
+            meta_tensor = data[key]
+            tensor_data = meta_tensor.data
+            nifti_img = nib.Nifti1Image(tensor_data.cpu().numpy(), meta_tensor.affine)
+            data[key] = nifti_img
+        return data

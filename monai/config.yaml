@@ -9,12 +9,10 @@ paths:
       - "derivatives/labels/sub-3902top/anat/"
   results: "/home/ge.polymtl.ca/jemal/data_nvme_jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/monai/results"
 
-data:
-  slice_axis: 1
-
 transformations:
+  resampling:
+    pixdim: [0.1, 0.1]
   randaffine:
-    proba: 0.8
     degrees: 40
     translation: [0.1, 0.1]
   normalize: true
@@ -42,9 +40,9 @@ UNet:
   normalisation: "batch"
 
 postprocessing:
-  remove_noise :
+  remove_noise:
     apply: true
     threshold: 0.01
-  remove_small :
+  remove_small:
     apply: true
     min_size: 3

@@ -110,3 +110,21 @@ class BoundaryDiceLoss(nn.Module):
         dice_loss = self.dice(prediction, target)
         boundary_loss = BoundaryLoss()(prediction, target)
         return dice_loss + self.boundary_weight * boundary_loss
+    
+
+class BoundaryAdapWingLoss(nn.Module):
+    def __init__(self, boundary_weight=0.5, theta=0.5, alpha=2.1, omega=14, epsilon=1, reduction='sum'):
+        self.theta = theta
+        self.alpha = alpha
+        self.omega = omega
+        self.epsilon = epsilon
+        self.reduction = reduction
+        self.boundary_weight = boundary_weight
+        super(BoundaryAdapWingLoss, self).__init__()    
+        self.adapwing = AdapWingLoss(theta=theta, alpha=alpha, omega=omega, epsilon=epsilon, reduction=reduction)
+        self.boundary = BoundaryLoss()
+
+    def forward(self, prediction, target):
+        adapwing_loss = self.adapwing(prediction, target)
+        boundary_loss = self.boundary(prediction, target)
+        return adapwing_loss + self.boundary_weight * boundary_loss

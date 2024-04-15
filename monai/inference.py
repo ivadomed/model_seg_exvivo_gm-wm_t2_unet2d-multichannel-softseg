@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import torch
 import yaml
 import nibabel as nib
+import matplotlib.pyplot as plt
 
 from datetime import datetime
 
@@ -12,18 +13,16 @@ from time import time
 
 from skimage.transform import resize
 
-from scipy.ndimage import zoom
-
 from monai.data import (DataLoader, decollate_batch)
-from monai.transforms import (Compose,ScaleIntensity)
-from monai.networks.nets import UNet, DynUNet
-from monai.losses import DiceCELoss, DiceLoss, DiceFocalLoss
+from monai.transforms import (Compose, EnsureTyped, Invertd)
+from monai.networks.nets import UNet
 
 from data import Inference2dDataset
 from utils import keep_largest_object, create_indexed_dir, get_last_folder_id
 from main import Model
-from loss import AdapWingLoss, BoundaryDiceLoss
+from loss import AdapWingLoss
 from metrics import compute_dice_score
+from transforms import inference_transforms
 
 # ===========================================================================
 #                   Prepare temporary dataset for inference
@@ -43,25 +42,25 @@ def prepare_data(config):
 
         #TODO: coder proprement
         nib_image = nib.load(data[0]['image'])
-        volume = nib_image.get_fdata()
-        affine = nib_image.affine
         
         # define inference_transforms
-        transform = Compose([
-                ScaleIntensity(),
-            ])
+        transform = inference_transforms(pixdim=config["transformations"]["resampling"]["pixdim"],) 
         
         logger.info(f"Loading dataset: {root}")      
-        dataset = Inference2dDataset(data = data, axis = 1, transform=transform)
+        dataset = Inference2dDataset(data = data, transform=transform)
 
-        return dataset, volume, affine
+        test_post_pred = Invertd(keys=["pred"], 
+                                transform=transform, 
+                                orig_keys=["image"])
+
+        return dataset, test_post_pred, nib_image
 
 # ===========================================================================
 #                           Inference method
 # ===========================================================================
 def main():
     device = "gpu"
-    gpu_id = 3
+    gpu_id = 1
 
     # Setup the device
     if device == "gpu" and not torch.cuda.is_available():
@@ -103,15 +102,16 @@ def main():
             os.makedirs(results_path, exist_ok=True)
 
         # define the dataset and dataloader
-        test_ds, volume, affine = prepare_data(config)
-        print(f"Len dataset: {len(test_ds)}")
+        test_ds, test_post_pred, nib_image = prepare_data(config)
+
         test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=8, pin_memory=True)
 
         # define list to collect the test metrics
         test_step_outputs = []
 
         # define list to collect the final volume
-        final_volume = []
+        #original_volume = nib_image.get_fdata()
+        slices = []
             
         # define the model and loss (not saved in the checkpoint)
        
@@ -127,13 +127,8 @@ def main():
                 norm = config["UNet"]["normalisation"],
             )
         
-        
-        #loss_function = AdapWingLoss(theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
-        #loss_function = AdapWingLoss()
-        #loss_function = DiceCELoss(include_background=False)
-        #loss_function = DiceLoss(include_background=True)
-        #loss_function = DiceFocalLoss()
-        loss_function = BoundaryDiceLoss(0.5)
+        # define the loss function
+        loss_function = AdapWingLoss(theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
 
         # load the trained model weights
         model = Model.load_from_checkpoint(chkp_path, net =net, loss_function = loss_function)
@@ -163,10 +158,14 @@ def main():
                     batch["pred"] = F.relu(batch["pred"])
 
                 # postprocessing
-                post_test_out = decollate_batch(batch)  
+                #post_test_out = decollate_batch(batch)  
+                post_test_out =  [test_post_pred(i) for i in decollate_batch(batch)]
 
-                pred = post_test_out[0]['pred'].cpu()
-                pred = pred.numpy()
+                pred_nifti = post_test_out[0]['pred']
+                pred = pred_nifti.get_fdata()
+
+                #remove the channel dimension
+                pred = pred.squeeze(0)
 
                 # threshold the prediction to set all values below pred_thr to 0
                 pred[pred < config["postprocessing"]["remove_noise"]["threshold"]] = 0
@@ -176,11 +175,8 @@ def main():
                     # keep only the largest connected component (to remove tiny blobs after thresholding)
                     #logger.info("Postprocessing: Keeping the largest connected component in the prediction")
                     pred = keep_largest_object(pred)
-                
-                #TODO: coder proprement
-                slice_final_volume = resize(pred, (128,128), anti_aliasing=True)
 
-                final_volume.append(slice_final_volume)
+                slices.append(pred)
                     
                 end_time = time()
                 metrics_dict = {
@@ -188,12 +184,13 @@ def main():
                     "inference_time_in_sec": round((end_time - start_time), 2),
                 }
                 test_step_outputs.append(metrics_dict)
+     
+            slices = list(reversed(slices))  
+            final_volume = np.stack(slices, axis=2)
+            final_volume = final_volume.swapaxes(2,1)
+            final_volume = np.rot90(final_volume, k=1, axes=(0, 2)) 
 
-            # save the final volume
-            final_volume = np.array(final_volume)
-
-            final_volume = np.moveaxis(final_volume, 1, 0)
-            final_nib = nib.Nifti1Image(final_volume, affine)
+            final_nib = nib.Nifti1Image(final_volume, nib_image.affine, nib_image.header)
 
             nib.save(final_nib, os.path.join(results_path, "segmentation.nii.gz"))
 
@@ -219,11 +216,39 @@ def main():
             ivadomed_seg_path = os.path.join(ivadomed_seg_path, "sub-3902bottom_T2w_wmseg.nii.gz")
         ivadomed_segmentation = nib.load(ivadomed_seg_path).get_fdata()
 
+        # save slices for visualization
+        idx_list=[100, 120,140,160,180,200]
+
+        fig, ax = plt.subplots(4,len(idx_list), figsize=(20, 18))
+        titles = ["Original", "Ground Truth", "New Segmentation", "Ivadomed Segmentation"]
+
+        for i,idx in enumerate(idx_list): 
+            ax[0][i].imshow(nib_image.get_fdata()[:,idx,:], cmap="gray")
+            ax[1][i].imshow(nib_image.get_fdata()[:,idx,:], cmap="gray")
+            ax[1][i].imshow(groundtruth[:,idx,:], cmap="copper" , alpha=0.6)
+            ax[2][i].imshow(nib_image.get_fdata()[:,idx,:], cmap="gray")
+            ax[2][i].imshow(new_segmentation[:,idx,:], cmap="copper" , alpha=0.6)
+            ax[3][i].imshow(nib_image.get_fdata()[:,idx,:], cmap="gray")
+            ax[3][i].imshow(ivadomed_segmentation[:,idx,:], cmap="copper" , alpha=0.6)
+
+        for a in ax.flatten():
+            a.axis('off')
+
+        plt.subplots_adjust(left=0.05, right=0.95, bottom=0.05, top=0.88, hspace=0.4, wspace=0.2)
+
+        for row, title in enumerate(titles):
+            fig.text(0.5, 0.91-(row*0.222), title, ha='center', va='center', fontsize=18, fontweight='heavy') 
+
+        fig.savefig(os.path.join(results_path, "slices.png"), dpi=300, bbox_inches='tight')
+
         # threshold the soft segmentations
         thr = 0.5
-        groundtruth[groundtruth < groundtruth.max()*thr] = 0
-        new_segmentation[new_segmentation < thr] = 0
-        ivadomed_segmentation[ivadomed_segmentation < thr] = 0
+        # groundtruth[groundtruth < groundtruth.max()*thr] = 0
+        # new_segmentation[new_segmentation < thr] = 0
+        # ivadomed_segmentation[ivadomed_segmentation < thr] = 0
+        groundtruth = (groundtruth > thr).astype(int)
+        new_segmentation = (new_segmentation > thr).astype(int)
+        ivadomed_segmentation = (ivadomed_segmentation > thr).astype(int)
 
         ivadomed_dice = compute_dice_score(ivadomed_segmentation, groundtruth)
         new_dice = compute_dice_score(new_segmentation, groundtruth)
