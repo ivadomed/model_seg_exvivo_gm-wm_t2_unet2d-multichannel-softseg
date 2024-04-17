@@ -395,7 +395,7 @@ def main(seed, check_val_every_n_epochs, max_epochs):
     logger.add(lambda msg: tqdm.write(msg, end=''), colorize=True)
     logger.add(os.path.join(training_dir, "logs.txt"), rotation="10 MB", level="INFO")
 
-    loss_func = BoundaryAdapWingLoss(boundary_weight=0.5, theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
+    loss_func = BoundaryAdapWingLoss(boundary_weight=0.3, theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
 
     logger.info(f"Using BoundaryAdapWingLoss with ratio {loss_func.boundary_weight*100}/{100 - loss_func.boundary_weight*100}; theta={loss_func.theta}, omega={loss_func.omega}, alpha={loss_func.alpha}, epsilon={loss_func.epsilon}!")
 

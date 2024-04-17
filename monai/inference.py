@@ -155,6 +155,9 @@ def postprocessing(batch, test_post_pred):
         batch["pred"] = F.relu(batch["pred"]) / F.relu(batch["pred"]).max()
     else:
         batch["pred"] = F.relu(batch["pred"])
+    
+    #binarize the output
+    batch["pred"] = (batch["pred"] > 0.5).float()
 
     post_test_out = [test_post_pred(i) for i in decollate_batch(batch)]
 
@@ -314,7 +317,7 @@ def segment_volume(path_model, input_filenames, threshold = 0.5, remove_temp_fil
 def main():
     
     # path to the model
-    path_model = "/home/ge.polymtl.ca/jemal/data_nvme_jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/monai"
+    path_model = "/home/ge.polymtl.ca/jemal/data_nvme_jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/monai/models/wmseg"
 
     # path to the input image
     path_img = "/home/ge.polymtl.ca/jemal/model_seg_exvivo_gm-wm_t2_unet2d-multichannel-softseg/sub-3902bottom/anat/sub-3902bottom_T2w.nii.gz"
