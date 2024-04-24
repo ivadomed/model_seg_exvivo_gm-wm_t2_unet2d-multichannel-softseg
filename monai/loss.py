@@ -3,8 +3,9 @@ import torch.nn as nn
 import scipy
 import scipy.ndimage
 import numpy as np
+import torch.nn.functional as F
 
-from monai.losses import DiceLoss
+from monai.losses import DiceLoss, DiceCELoss
 
 from scipy.ndimage import distance_transform_edt as distance
 
@@ -128,3 +129,29 @@ class BoundaryAdapWingLoss(nn.Module):
         adapwing_loss = self.adapwing(prediction, target)
         boundary_loss = self.boundary(prediction, target)
         return adapwing_loss + self.boundary_weight * boundary_loss
+    
+    
+def custom_overlap_penalty(outputs, targets):
+    # Assuming outputs are logits from the network and targets are indices
+    probs = F.softmax(outputs, dim=1)  # Convert logits to probabilities
+    white_matter_probs = probs[:, 1, :, :]  # Probabilities for white matter
+    gray_matter_probs = probs[:, 2, :, :]   # Probabilities for gray matter
+
+    # Calculate overlap as the product of probabilities for white and gray matter
+    overlap = white_matter_probs * gray_matter_probs
+
+    # Penalty could be the sum or mean of the overlap area
+    penalty = overlap.mean()
+
+    return penalty
+
+class DiceCELossPenality(nn.Module):
+    def __init__(self, include_background = True, to_onehot_y = True, softmax = True, squared_pred = True, jaccard = False, ce_weight = torch.tensor([1.0, 1.0, 1.0]), penalty_weight=0.5):
+        super(DiceCELossPenality, self).__init__()
+        self.dice_ce = DiceCELoss(include_background = include_background, to_onehot_y=to_onehot_y, softmax=softmax, squared_pred=squared_pred, jaccard= jaccard, ce_weight=ce_weight)
+        self.penalty_weight = penalty_weight
+
+    def forward(self, prediction, target):
+        dice_ce_loss = self.dice_ce(prediction, target)
+        penalty = custom_overlap_penalty(prediction, target)
+        return dice_ce_loss + self.penalty_weight * penalty

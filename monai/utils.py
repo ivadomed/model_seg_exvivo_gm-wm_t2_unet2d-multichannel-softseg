@@ -23,12 +23,18 @@ def plot_slices(image, gt, pred, debug=False):
     gt = gt.numpy()
     pred = pred.numpy()
 
+
+    pred_3c = np.zeros((pred.shape[1], pred.shape[2], 3))
+    pred_3c[:, :, 1] = pred[1,:, :]
+    pred_3c[:, :, 2] = pred[2,:, :]
+     
+
    # if not debug:
     fig, axs = plt.subplots(3, 1, figsize=(10, 6))
     fig.suptitle('Original Image --> Ground Truth --> Prediction')
     axs[0].imshow(image, cmap='gray'); axs[0].axis('off') 
     axs[1].imshow(gt); axs[1].axis('off')
-    axs[2].imshow(pred); axs[2].axis('off')
+    axs[2].imshow(pred_3c); axs[2].axis('off')
     
 
     plt.tight_layout()

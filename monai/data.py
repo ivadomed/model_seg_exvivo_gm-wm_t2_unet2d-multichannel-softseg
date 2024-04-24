@@ -112,9 +112,8 @@ class Segmentation2dDatasetMulticlass(Dataset):
             data (list): List of dictionnaries containing the file paths of the 3D volumes.
             transform (callable, optional): Optional transform to be applied on a sample.
         """
-        self.slices = []
-        self.masks_wm = []
-        self.masks_gm = []
+        self.images = []
+        self.masks = []
         self.transform = transform
 
         n_volumes = len(data)
@@ -149,32 +148,30 @@ class Segmentation2dDatasetMulticlass(Dataset):
             image_data = nifti_image.get_fdata()
             mask_data_wm = nifti_mask_wm.get_fdata()
             mask_data_gm = nifti_mask_gm.get_fdata()
+            mask_data = np.zeros(image_data.shape)
+            mask_data[mask_data_wm > 0] = 1
+            mask_data[mask_data_gm > 0] = 2
             for j in tqdm(range(depth), desc="Loading slices"):
                 # Extract the 2D slice and its corresponding mask
-                slice = np.take(image_data, j, axis)
-                mask_wm = np.take(mask_data_wm, j, axis)
-                mask_gm = np.take(mask_data_gm, j, axis)
+                image = np.take(image_data, j, axis)
+                mask = np.take(mask_data, j, axis)
                 
-                if not (slice.sum() == 0 or mask_wm.sum() == 0 or mask_gm.sum() == 0):
+                if not (image.sum() == 0 or mask.sum() == 0):
                     
                     # Correct the header to match the new shape
-                    slice_header = nifti_image.header.copy()
-                    mask_wm_header = nifti_mask_wm.header.copy()
-                    mask_gm_header = nifti_mask_gm.header.copy()
-                    slice_header.set_data_shape(slice.shape)
-                    mask_wm_header.set_data_shape(mask_wm.shape)
-                    mask_gm_header.set_data_shape(mask_gm.shape)
+                    image_header = nifti_image.header.copy()
+                    mask_header = nifti_mask_wm.header.copy()
 
+                    image_header.set_data_shape(image.shape)
+                    mask_header.set_data_shape(mask.shape)
 
                     # Create new NIfTI images (might take too much time and memory, consider other methods.... > TODO)
-                    slice = nib.Nifti1Image(slice, canonical_affine, slice_header)
-                    mask_wm = nib.Nifti1Image(mask_wm, canonical_affine, mask_wm_header)
-                    mask_gm = nib.Nifti1Image(mask_gm, canonical_affine, mask_gm_header)
+                    image = nib.Nifti1Image(image, canonical_affine, image_header)
+                    mask = nib.Nifti1Image(mask, canonical_affine, mask_header)
 
                     # Append the 2D slice and its corresponding mask to the dataset, as Nifti1Images
-                    self.slices.append(slice)
-                    self.masks_wm.append(mask_wm)
-                    self.masks_gm.append(mask_gm)  
+                    self.images.append(image)
+                    self.masks.append(mask)
                 
         logger.info("Dataset loaded!")          
 
@@ -186,11 +183,10 @@ class Segmentation2dDatasetMulticlass(Dataset):
         Returns:
             dict: A dictionnary containing the 2D slice and its corresponding mask.
         """
-        slice = self.slices[index]
-        mask_wm = self.masks_wm[index]
-        mask_gm = self.masks_gm[index]
+        image = self.images[index]
+        mask = self.masks[index]
 
-        sample = {"image": slice, "mask_wm": mask_wm, "mask_gm": mask_gm}
+        sample = {"image": image, "mask": mask}
 
         # Apply transformations if any
         if self.transform:
@@ -202,7 +198,7 @@ class Segmentation2dDatasetMulticlass(Dataset):
         """
         Returns the total number of samples in the dataset.
         """
-        return len(self.slices)
+        return len(self.images)
 
 
 def remove_empty_slices(images, masks):

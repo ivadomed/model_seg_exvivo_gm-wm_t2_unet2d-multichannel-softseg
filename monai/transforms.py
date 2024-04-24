@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import nibabel as nib
 
-from monai.transforms import Compose, RandAffined, Rand2DElasticd, Spacingd, NormalizeIntensityd, InvertibleTransform, RandScaleIntensityd, RandGaussianNoised
+from monai.transforms import Compose, RandAffined, Rand2DElasticd, Spacingd, NormalizeIntensityd, InvertibleTransform, RandScaleIntensityd, RandGaussianNoised, SpatialPadd
 from monai.data import MetaTensor
 
 def training_transforms(pixdim=(0.1,0.1), translate_range=(-0.1, 0.1), rotate_range=45):
@@ -10,6 +10,7 @@ def training_transforms(pixdim=(0.1,0.1), translate_range=(-0.1, 0.1), rotate_ra
         ToMetaTensord(keys=["image", "mask"]),
         Spacingd(keys=["image", "mask"], pixdim=pixdim, align_corners=True, mode=("bilinear", "nearest"), dtype=np.float32, scale_extent=True), 
         #Data augmentation
+        SpatialPadd(keys=["image", "mask"], spatial_size=(256, 256), mode="constant"),
         RandAffined(keys=["image", "mask"], 
                     prob=0.9, 
                     translate_range= translate_range, 
@@ -17,25 +18,6 @@ def training_transforms(pixdim=(0.1,0.1), translate_range=(-0.1, 0.1), rotate_ra
                     padding_mode="zeros"),
         Rand2DElasticd(keys=["image", "mask"], prob=0.5, spacing=(15, 15), magnitude_range=(1, 2)),
         RandGaussianNoised(keys=["image", "mask"], prob=0.4, mean=0.0, std=0.03),
-        #RandGaussianSmoothd(keys=["image", "mask"], prob=0.5, sigma_x=(0.5, 1.0), sigma_y=(0.5, 1.0)),
-        RandScaleIntensityd(keys=["image"], prob=0.5, factors=(0.5, 1.5)),
-
-        NormalizeIntensityd(keys=["image"]),
-    ]
-    return Compose(transforms_list)
-
-def training_transforms_multiclass(pixdim=(0.1,0.1), translate_range=(-0.1, 0.1), rotate_range=45):
-    transforms_list = [
-        ToMetaTensord(keys=["image", "mask_wm", "mask_gm"]),
-        Spacingd(keys=["image", "mask_wm", "mask_gm"], pixdim=pixdim, align_corners=True, mode=("bilinear", "nearest", "nearest"), dtype=np.float32, scale_extent=True), 
-        #Data augmentation
-        RandAffined(keys=["image", "mask_wm", "mask_gm"], 
-                    prob=0.9, 
-                    translate_range= translate_range, 
-                    rotate_range= (-rotate_range / 360 * 2. * np.pi, rotate_range / 360 * 2. * np.pi), 
-                    padding_mode="zeros"),
-        Rand2DElasticd(keys=["image", "mask_wm", "mask_gm"], prob=0.5, spacing=(15, 15), magnitude_range=(1, 2)),
-        RandGaussianNoised(keys=["image", "mask_wm", "mask_gm"], prob=0.4, mean=0.0, std=0.03),
         #RandGaussianSmoothd(keys=["image", "mask"], prob=0.5, sigma_x=(0.5, 1.0), sigma_y=(0.5, 1.0)),
         RandScaleIntensityd(keys=["image"], prob=0.5, factors=(0.5, 1.5)),
 

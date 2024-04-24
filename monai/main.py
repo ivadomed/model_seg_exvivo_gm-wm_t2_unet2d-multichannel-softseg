@@ -17,17 +17,18 @@ from monai.utils import set_determinism
 from monai.networks.nets import UNet
 from monai.data import (DataLoader, decollate_batch)
 from monai.transforms import (Compose, EnsureType)
+from monai.losses import DiceCELoss
 
 from utils import plot_slices, check_empty_patch, create_indexed_dir, get_last_folder_id
 from metrics import dice_score
-from loss import AdapWingLoss, BoundaryDiceLoss, BoundaryAdapWingLoss
+from loss import AdapWingLoss, BoundaryDiceLoss, BoundaryAdapWingLoss, DiceCELossPenality
 from transforms import training_transforms
-from data import Segmentation2dDataset
+from data import Segmentation2dDatasetMulticlass
 
 
 # create a "model"-agnostic class with PL to use different models
 class Model(pl.LightningModule):
-    def __init__(self, config, data_root, optimizer_class, loss_function,  net, mask_type, seed, debug = False, exp_id=None, results_path=None):
+    def __init__(self, config, data_root, optimizer_class, loss_function,  net, seed, debug = False, exp_id=None, results_path=None):
         super().__init__() 
         self.config = config
         self.save_hyperparameters(ignore=['net', 'loss_function'])
@@ -38,7 +39,6 @@ class Model(pl.LightningModule):
         self.lr = config["training"]["learning_rate"]
         self.loss_function = loss_function
         self.optimizer_class = optimizer_class
-        self.mask_type = mask_type
         self.seed = seed
         self.debug = debug
         self.save_exp_id = exp_id
@@ -67,14 +67,10 @@ class Model(pl.LightningModule):
     # --------------------------------
     def forward(self, x):
         
-        out = self.net(x)  
-        # # NOTE: MONAI's models only output the logits, not the output after the final activation function
-        # # https://docs.monai.io/en/0.9.0/_modules/monai/networks/nets/unetr.html#UNETR.forward refers to the 
-        # # UnetOutBlock (https://docs.monai.io/en/0.9.0/_modules/monai/networks/blocks/dynunet_block.html#UnetOutBlock) 
-        # # as the final block applied to the input, which is just a convolutional layer with no activation function
-        # # Hence, we are used Normalized ReLU to normalize the logits to the final output
-        # normalized_out = F.relu(out) / F.relu(out).max() if bool(F.relu(out).max()) else F.relu(out)
-        return out  # returns logits
+        out = self.net(x)        
+
+        return out # no need to apply softmax with CrossEntropyLoss
+        #return F.softmax(out, dim=1)  # convert output logits into probalities
 
     # --------------------------------
     # DATA PREPARATION
@@ -82,13 +78,6 @@ class Model(pl.LightningModule):
     def prepare_data(self):
         # set deterministic training for reproducibility
         set_determinism(seed=self.seed)
-
-        if self.mask_type == "wm":
-            ext = "wmseg_manual"
-        elif self.mask_type == "gm":
-            ext = "gmseg_manual"
-        else:
-            raise ValueError("Invalid mask type")
         
         image_dir = [os.path.join(self.root, sub_path) for sub_path in self.config["paths"]["sub_paths"]["img"]]
         masks_dir = [os.path.join(self.root, sub_path) for sub_path in self.config["paths"]["sub_paths"]["masks"]]
@@ -98,12 +87,15 @@ class Model(pl.LightningModule):
         for i in range(len(image_dir)):
             stems = [f[:-7] for f in os.listdir(image_dir[i]) if  f.endswith('.nii.gz')]
             for stem in stems:
-                if not os.path.exists(os.path.join(masks_dir[i], f"{stem}_{ext}.nii.gz")):
-                    raise ValueError(f"No {self.mask_type} mask found for {stem}")
+                if not os.path.exists(os.path.join(masks_dir[i], f"{stem}_wmseg_manual.nii.gz")):
+                    raise ValueError(f"No wm mask found for {stem}")
+                elif not os.path.exists(os.path.join(masks_dir[i], f"{stem}_gmseg_manual.nii.gz")):
+                    raise ValueError(f"No gm mask found for {stem}")
                 else :
                     data.append({
                         "image": os.path.join(image_dir[i], f"{stem}.nii.gz"),
-                        "mask": os.path.join(masks_dir[i], f"{stem}_{ext}.nii.gz")
+                        "mask_wm": os.path.join(masks_dir[i], f"{stem}_wmseg_manual.nii.gz"),
+                        "mask_gm": os.path.join(masks_dir[i], f"{stem}_gmseg_manual.nii.gz"),
                     })
         
         # define training and validation transforms
@@ -112,7 +104,7 @@ class Model(pl.LightningModule):
         transform = training_transforms(pixdim=self.spacing, translate_range=affine_translation, rotate_range=affine_degrees)
         
         logger.info(f"Loading dataset: {self.root}")      
-        dataset = Segmentation2dDataset(data = data, transform=transform)
+        dataset = Segmentation2dDatasetMulticlass(data = data, transform=transform)
         self.train_dataset, self.val_dataset = random_split(dataset, [self.config["training"]["train_set_size"], self.config["training"]["val_set_size"]])
         
 
@@ -330,133 +322,145 @@ def main(seed, check_val_every_n_epochs, max_epochs):
         optimizer_class = torch.optim.SGD
 
     model_type = "UNet"
-    mask_types = ['wm','gm']
 
-    for mask_type in mask_types:
-        # create a directory to save the training results
-        training_dir = os.path.join(training_dir_masks, mask_type)
+    # create a directory to save the training results
+    training_dir = training_dir_masks
 
-        # define models
-        if model_type in ["unet", "UNet"]:
-            # define image size to be fed to the model
+    # define models
+    if model_type in ["unet", "UNet"]:
+        # define image size to be fed to the model
+        
+        # define model
+        net = UNet(
+            spatial_dims = config["UNet"]["spatial_dims"],
+            in_channels = 1,
+            out_channels = 3,
+            channels = tuple(config["UNet"]["channels"]),
+            strides = tuple(config["UNet"]["strides"]),
+            num_res_units = config["UNet"]["num_res_units"],
+            dropout = config["UNet"]["dropout"],
+            act = config["UNet"]["activation"],
+            norm = config["UNet"]["normalisation"],
+        )
+
+        lr = config["training"]["learning_rate"]
+        bs = config["training"]["batch_size"]
+
+    # save output to a log file
+    logger.remove()
+    logger.add(lambda msg: tqdm.write(msg, end=''), colorize=True)
+    logger.add(os.path.join(training_dir, "logs.txt"), rotation="10 MB", level="INFO")
+    
+    # loss_func = BoundaryAdapWingLoss(boundary_weight=0.3, theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
+
+    # logger.info(f"Using BoundaryAdapWingLoss with BOundaryratio {loss_func.boundary_weight*100}/{100 - loss_func.boundary_weight*100}; theta={loss_func.theta}, omega={loss_func.omega}, alpha={loss_func.alpha}, epsilon={loss_func.epsilon}!")
+
+    include_background = True
+    to_onehot_y = True
+    softmax = True
+    squared_pred = True
+    jaccard = False
+    class_weights = torch.tensor([0.5, 1.0, 2.0])
+
+    # loss_func = DiceCELoss(include_background = include_background, to_onehot_y=to_onehot_y, softmax=softmax, squared_pred=squared_pred, jaccard= jaccard, ce_weight=class_weights)
+
+    # logger.info(f"Using DiceCELoss with params: include_background={include_background}, to_onehot_y={to_onehot_y}, softmax={softmax}, squared_pred={squared_pred}, jaccard={jaccard}, ce_weight={class_weights}")
+
+    loss_func = DiceCELossPenality(include_background = include_background, to_onehot_y=to_onehot_y, softmax=softmax, squared_pred=squared_pred, jaccard= jaccard, ce_weight=class_weights, penalty_weight=10)
+
+
+
+    # define callbacks
+    early_stopping = pl.callbacks.EarlyStopping(monitor="val_loss", min_delta=0.00, 
+                                                patience=config["training"]["early_stopping_patience"], verbose=False, mode="min")
+
+    lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='epoch')
+
+    # Training
+    # to save the best model on validation
+    save_path = os.path.join(training_dir, "models")
+
+    if not os.path.exists(save_path):
+        os.makedirs(save_path, exist_ok=True)
+
+    # to save the results/model predictions 
+    results_path = os.path.join(training_dir, "results_train")
+    if not os.path.exists(results_path):
+        os.makedirs(results_path, exist_ok=True)
+
+    inference_path = os.path.join(training_dir, "inference")
+    if not os.path.exists(inference_path):
+        os.makedirs(inference_path, exist_ok=True)
+
+    # i.e. train by loading weights from scratch
+    pl_model = Model(config = config, data_root= dataset_root, 
+                        optimizer_class= optimizer_class, loss_function= loss_func, net= net, seed= seed, results_path=results_path)
             
-            # define model
-            net = UNet(
-                spatial_dims = config["UNet"]["spatial_dims"],
-                in_channels = config["UNet"]["in_channels"],
-                out_channels = config["UNet"]["out_channels"],
-                channels = tuple(config["UNet"]["channels"]),
-                strides = tuple(config["UNet"]["strides"]),
-                num_res_units = config["UNet"]["num_res_units"],
-                dropout = config["UNet"]["dropout"],
-                act = config["UNet"]["activation"],
-                norm = config["UNet"]["normalisation"],
-            )
-
-            lr = config["training"]["learning_rate"]
-            bs = config["training"]["batch_size"]
-
-        # save output to a log file
-        logger.remove()
-        logger.add(lambda msg: tqdm.write(msg, end=''), colorize=True)
-        logger.add(os.path.join(training_dir, "logs.txt"), rotation="10 MB", level="INFO")
-        
-        loss_func = BoundaryAdapWingLoss(boundary_weight=0.3, theta=0.5, omega=8, alpha=2.1, epsilon=1, reduction="sum")
-
-        logger.info(f"Using BoundaryAdapWingLoss with BOundaryratio {loss_func.boundary_weight*100}/{100 - loss_func.boundary_weight*100}; theta={loss_func.theta}, omega={loss_func.omega}, alpha={loss_func.alpha}, epsilon={loss_func.epsilon}!")
-
-        # define callbacks
-        early_stopping = pl.callbacks.EarlyStopping(monitor="val_loss", min_delta=0.00, 
-                                                    patience=config["training"]["early_stopping_patience"], verbose=False, mode="min")
-
-        lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='epoch')
-
-        # Training
-        # to save the best model on validation
-        save_path = os.path.join(training_dir, "models")
-
-        if not os.path.exists(save_path):
-            os.makedirs(save_path, exist_ok=True)
-
-        # to save the results/model predictions 
-        results_path = os.path.join(training_dir, "results_train")
-        if not os.path.exists(results_path):
-            os.makedirs(results_path, exist_ok=True)
-
-        inference_path = os.path.join(training_dir, "inference")
-        if not os.path.exists(inference_path):
-            os.makedirs(inference_path, exist_ok=True)
-
-        # i.e. train by loading weights from scratch
-        pl_model = Model(config = config, data_root= dataset_root, 
-                         optimizer_class= optimizer_class, loss_function= loss_func, net= net, 
-                         mask_type= mask_type, seed= seed, results_path=results_path)
-                
-        # saving the best model based on validation loss
-        logger.info(f"Saving best model to {save_path}!")
-        checkpoint_callback_loss = pl.callbacks.ModelCheckpoint(
-            dirpath=save_path, filename='best_model_loss', monitor='val_loss', 
-            save_top_k=1, mode="min", save_last=True, save_weights_only=False)
-        
-        # saving the best model based on soft validation dice score
-        checkpoint_callback_dice = pl.callbacks.ModelCheckpoint(
-            dirpath=save_path, filename='best_model_dice', monitor='val_soft_dice', 
-            save_top_k=1, mode="max", save_last=False, save_weights_only=True)
-        
-        logger.info(f" Starting training from scratch! ")
-        # wandb logger
-        grp = f"monai_ivado_{model_type}" if model_type in ["unet", "UNet"] else f"monai_{model_type}"
-        folder_id = get_last_folder_id(config["paths"]["results"])
-        exp_logger = WandbLogger(
-                            name=f"training_{folder_id}_mask_{mask_type}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
-                            save_dir=save_path,
-                            group=grp,
-                            log_model=True, # save best model using checkpoint callback
-                            project='ivadomed2monai',
-                            entity='',
-                            config=config) 
-
-        # initialise Lightning's trainer.
-        trainer = pl.Trainer(
-            devices=1, accelerator="gpu", # strategy="ddp",
-            logger=exp_logger,
-            callbacks=[checkpoint_callback_loss, checkpoint_callback_dice, lr_monitor, early_stopping],
-            check_val_every_n_epoch=check_val_every_n_epochs,
-            max_epochs= max_epochs, 
-            precision=32,   
-            # deterministic=True,
-            enable_progress_bar= True, 
-            profiler="simple",)     # to profile the training time taken for each step
-
-        # Train!
-        trainer.fit(pl_model)        
-        logger.info(f"[{mask_type}]Training Done!")
-
-        
-        # Saving training script to wan db
-        wandb.save("main.py")
-        wandb.save("transforms.py")
-
-        # closing the current wandb instance so that a new one is created for the next fold
-        wandb.finish()    
+    # saving the best model based on validation loss
+    logger.info(f"Saving best model to {save_path}!")
+    checkpoint_callback_loss = pl.callbacks.ModelCheckpoint(
+        dirpath=save_path, filename='best_model_loss', monitor='val_loss', 
+        save_top_k=1, mode="min", save_last=True, save_weights_only=False)
     
-
-        with open(os.path.join(results_path, 'val_metrics.txt'), 'a') as f:
-            print('\n-------------- Val Metrics ----------------', file=f)
-            print(f"\nSeed Used: {seed}", file=f)
-            lr = config["training"]["learning_rate"]
-            bs = config["training"]["batch_size"]
-            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-            print(f"\nlr={lr}_bs={bs}_{timestamp}", file=f)
-            print(f"\npatch_size={pl_model.voxel_cropping_size}", file=f)
-            print('\n-------------- Loss ----------------', file=f)
-            print("Best Validation Loss --> %0.3f at Epoch: %0.3f" % (pl_model.best_val_loss, pl_model.best_val_loss_epoch), file=f)
-
-            print('\n-------------- Dice Score ----------------', file=f)
-            print("Best Dice Score --> %0.3f at Epoch: %0.3f" % (pl_model.best_val_dice, pl_model.best_val_dice_epoch), file=f)
-
-            print('-------------------------------------------------------', file=f)
+    # saving the best model based on soft validation dice score
+    checkpoint_callback_dice = pl.callbacks.ModelCheckpoint(
+        dirpath=save_path, filename='best_model_dice', monitor='val_soft_dice', 
+        save_top_k=1, mode="max", save_last=False, save_weights_only=True)
     
+    logger.info(f" Starting training from scratch! ")
+    # wandb logger
+    grp = f"monai_ivado_{model_type}" if model_type in ["unet", "UNet"] else f"monai_{model_type}"
+    folder_id = get_last_folder_id(config["paths"]["results"])
+    exp_logger = WandbLogger(
+                        name=f"training_{folder_id}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
+                        save_dir=save_path,
+                        group=grp,
+                        log_model=True, # save best model using checkpoint callback
+                        project='ivadomed2monai',
+                        entity='',
+                        config=config) 
+
+    # initialise Lightning's trainer.
+    trainer = pl.Trainer(
+        devices=1, accelerator="gpu", # strategy="ddp",
+        logger=exp_logger,
+        callbacks=[checkpoint_callback_loss, checkpoint_callback_dice, lr_monitor, early_stopping],
+        check_val_every_n_epoch=check_val_every_n_epochs,
+        max_epochs= max_epochs, 
+        precision=32,   
+        # deterministic=True,
+        enable_progress_bar= True, 
+        profiler="simple",)     # to profile the training time taken for each step
+
+    # Train!
+    trainer.fit(pl_model)        
+    logger.info(f"Training Done!")
+
+    
+    # Saving training script to wan db
+    wandb.save("main.py")
+    wandb.save("transforms.py")
+
+    # closing the current wandb instance so that a new one is created for the next fold
+    wandb.finish()    
+
+
+    with open(os.path.join(results_path, 'val_metrics.txt'), 'a') as f:
+        print('\n-------------- Val Metrics ----------------', file=f)
+        print(f"\nSeed Used: {seed}", file=f)
+        lr = config["training"]["learning_rate"]
+        bs = config["training"]["batch_size"]
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        print(f"\nlr={lr}_bs={bs}_{timestamp}", file=f)
+        print(f"\npatch_size={pl_model.voxel_cropping_size}", file=f)
+        print('\n-------------- Loss ----------------', file=f)
+        print("Best Validation Loss --> %0.3f at Epoch: %0.3f" % (pl_model.best_val_loss, pl_model.best_val_loss_epoch), file=f)
+
+        print('\n-------------- Dice Score ----------------', file=f)
+        print("Best Dice Score --> %0.3f at Epoch: %0.3f" % (pl_model.best_val_dice, pl_model.best_val_dice_epoch), file=f)
+
+        print('-------------------------------------------------------', file=f)
+
     
 if __name__ == "__main__":
     seed = 42
